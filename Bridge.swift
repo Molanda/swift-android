@@ -1,16 +1,7 @@
-import ScadeKit
-
-typealias NSObject = SwiftFoundation.NSObject
-
-extension DispatchGroup {
-  func notify(queue: DispatchQueue, execute work: @escaping () -> Void) {
-    self.notify(qos: .unspecified, flags: [], queue: DispatchQueue.global(qos: .background)) {
-      DispatchQueue.main.async {
-        work()
-      }
-    }
-  }
-}
+import Foundation
+import FoundationXML
+import FoundationNetworking
+import JNI
 
 class UserDefaults {
   private var defaults = [String: Any]()

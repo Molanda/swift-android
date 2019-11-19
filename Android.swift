@@ -1,8 +1,33 @@
-import ScadeKit
+import Foundation
+import FoundationXML
+import FoundationNetworking
 import JNI
 
 class Android {
-  class Object: JavaParameterConvertible {
+  class Junction {
+    func toUnretainedHandle() -> Int64 {
+      return Int64(Int(bitPattern: Unmanaged.passUnretained(self).toOpaque()))
+    }
+
+    func toRetainedHandle() -> Int64 {
+      return Int64(Int(bitPattern: Unmanaged.passRetained(self).toOpaque()))
+    }
+
+    func release() {
+      Unmanaged.passUnretained(self).release()
+    }
+
+    static func fromHandle(_ handle: Int64) -> Self? {
+      if handle != 0 {
+        if let pointer = UnsafeRawPointer(bitPattern: Int(truncatingIfNeeded: handle)) {
+          return Unmanaged.fromOpaque(pointer).takeUnretainedValue()
+        }
+      }
+      return nil
+    }
+  }
+
+  class Object: JavaParameterConvertible, JavaInitializableFromMethod, JavaInitializableFromField {
     private var this: JavaObject? = nil
 
     class var type: String {
@@ -13,7 +38,7 @@ class Android {
 
     class var javaClass: JavaClass {
       get {
-        return jni.FindClass(name: self.type)
+        return try! jni.FindClass(name: self.type)
       }
     }
 
@@ -42,7 +67,7 @@ class Android {
 
     deinit {
       if let this = self.this {
-        jni.DeleteGlobalRef(globalRef: this)
+        jni.DeleteGlobalRef(this)
       }
     }
 
@@ -52,6 +77,15 @@ class Android {
 
     func toJavaObject() -> JavaObject {
       return self.this!
+    }
+
+    func isSameObject(_ object: Object?) -> Bool {
+      if let object = object {
+        if self.isNull == false && object.isNull == false {
+          return (jni.IsSameObject(self.toJavaObject(), object.toJavaObject()) != 0)
+        }
+      }
+      return false
     }
 
     static func fromJavaObject(object: JavaObject) throws -> Self {
@@ -82,7 +116,7 @@ class Android {
       return try! jni.callStatic(methodName, on: self.javaClass, arguments: javaArgs) as Void
     }
 
-    @discardableResult fileprivate static func call<T: JavaParameterConvertible>(_ methodName: String, with javaArgs: [JavaParameterConvertible] = []) -> T {
+    @discardableResult fileprivate static func call<T: JavaParameterConvertible & JavaInitializableFromMethod>(_ methodName: String, with javaArgs: [JavaParameterConvertible] = []) -> T {
       return try! jni.callStatic(methodName, on: self.javaClass, arguments: javaArgs)
     }
 
@@ -90,20 +124,28 @@ class Android {
       return try! jni.call(methodName, on: self.this!, arguments: javaArgs) as Void
     }
 
-    @discardableResult fileprivate func call<T: JavaParameterConvertible>(_ methodName: String, with javaArgs: [JavaParameterConvertible] = []) -> T {
+    @discardableResult fileprivate func call<T: JavaParameterConvertible & JavaInitializableFromMethod>(_ methodName: String, with javaArgs: [JavaParameterConvertible] = []) -> T {
       return try! jni.call(methodName, on: self.this!, arguments: javaArgs)
     }
 
-    fileprivate func get<T: JavaParameterConvertible>(_ fieldName: String) -> T {
+    fileprivate func get<T: JavaParameterConvertible & JavaInitializableFromField>(_ fieldName: String) -> T {
       let javaClass = try! jni.GetObjectClass(obj: self.this!)
       let javaArgs: [JavaParameterConvertible] = [fieldName]
       let javaField = try! jni.call("getField", on: javaClass, arguments: javaArgs, returningObjectType: "java/lang/reflect/Field")
-      let javaFieldId = jni.FromReflectedField(field: javaField!)
+      let javaFieldId = jni.FromReflectedField(field: javaField)
       return try! T.fromField(javaFieldId, on: self.this!)
+    }
+
+    fileprivate static func get<T: JavaParameterConvertible & JavaInitializableFromField>(_ fieldName: String) -> T {
+      let javaClass = self.javaClass
+      let javaArgs: [JavaParameterConvertible] = [fieldName]
+      let javaField = try! jni.call("getField", on: javaClass, arguments: javaArgs, returningObjectType: "java/lang/reflect/Field")
+      let javaFieldId = jni.FromReflectedField(field: javaField)
+      return try! T.fromStaticField(javaFieldId, of: javaClass)
     }
   }
 
-  class Array: JavaParameterConvertible {
+  class Array: JavaParameterConvertible, JavaInitializableFromMethod, JavaInitializableFromField {
     private var this: JavaObject? = nil
 
     class var type: String {
@@ -114,13 +156,17 @@ class Android {
 
     class var javaClass: JavaClass {
       get {
-        return jni.FindClass(name: self.type)
+        return try! jni.FindClass(name: self.type)
       }
     }
 
     class var asJNIParameterString: String {
       get {
-        return "[\(self.type)"
+        if self.type.count == 1 {
+          return "[\(self.type)"
+        } else {
+          return "[L\(self.type);"
+        }
       }
     }
 
@@ -138,7 +184,7 @@ class Android {
 
     deinit {
       if let this = self.this {
-        jni.DeleteGlobalRef(globalRef: this)
+        jni.DeleteGlobalRef(this)
       }
     }
 
@@ -191,7 +237,7 @@ class Android {
     convenience init(bytes: [UInt8]?) {
       var array: JavaArray? = nil
       if let bytes = bytes {
-        array = jni.NewByteArray(count: bytes.count)
+        array = try! jni.NewByteArray(count: bytes.count)
         if let array = array {
           jni.SetByteArrayRegion(array: array, from: bytes.map(Int8.init))
         }
@@ -211,12 +257,70 @@ class Android {
       var array: JavaArray? = nil
       if let value = value {
         let bytes: [UInt8] = Swift.Array(value.utf8)
-        array = jni.NewByteArray(count: bytes.count)
+        array = try! jni.NewByteArray(count: bytes.count)
         if let array = array {
           jni.SetByteArrayRegion(array: array, from: bytes.map(Int8.init))
         }
       }
       self.init(for: array)
+    }
+  }
+
+  class StringArray: Array {
+    override class var type: String {
+      get {
+        return "java/lang/String"
+      }
+    }
+
+    convenience init(strings: [String]) {
+      var array: JavaArray? = nil
+      array = try! jni.NewObjectArray(count: strings.count, targetClass: Self.javaClass)
+      if let array = array {
+        for (index, string) in strings.enumerated() {
+          jni.SetObjectArrayElement(in: array, at: index, from: jni.NewStringUTF(string))
+        }
+      }
+      self.init(for: array)
+    }
+  }
+
+  class CharSequence: Object {
+    override class var type: String {
+      get {
+        return "java/lang/CharSequence"
+      }
+    }
+
+    convenience init(value: String) {
+      self.init(for: jni.NewStringUTF(value))
+    }
+  }
+
+  class SpannableString: Object {
+    override class var type: String {
+      get {
+        return "android/text/SpannableString"
+      }
+    }
+
+    struct Span: OptionSet {
+      let rawValue: Int
+
+      static let InclusiveExclusive = Span(rawValue: 17)
+      static let InclusiveInclusive = Span(rawValue: 18)
+      static let ExclusiveExclusive = Span(rawValue: 33)
+      static let ExclusiveInclusive = Span(rawValue: 34)
+    }
+
+    convenience init(value: String) {
+      let javaArgs: [JavaParameterConvertible] = [CharSequence(value: value)]
+      self.init(with: javaArgs, as: SpannableString.type)
+    }
+
+    func setSpan(_ what: Object, start: Int, end: Int, span: Span) {
+      let javaArgs: [JavaParameterConvertible] = [Object(for: what.toJavaObject()), Int32(start), Int32(end), Int32(span.rawValue)]
+      self.call("setSpan", with: javaArgs)
     }
   }
 
@@ -289,6 +393,26 @@ class Android {
     }
   }
 
+  class Point: Object {
+    override class var type: String {
+      get {
+        return "android/graphics/Point"
+      }
+    }
+
+    var x: Int {
+      get {
+        return Int(self.get("x") as Int32)
+      }
+    }
+
+    var y: Int {
+      get {
+        return Int(self.get("y") as Int32)
+      }
+    }
+  }
+
   class ActivityThread: Object {
     override class var type: String {
       get {
@@ -317,6 +441,63 @@ class Android {
     }
   }
 
+  class File: Object {
+    override class var type: String {
+      get {
+        return "java/io/File"
+      }
+    }
+
+    func getAbsolutePath() -> String {
+      return self.call("getAbsolutePath") as String
+    }
+  }
+
+  class Intent: Object {
+    override class var type: String {
+      get {
+        return "android/content/Intent"
+      }
+    }
+
+    convenience init() {
+      self.init(as: Intent.type)
+    }
+
+    enum Action: String {
+      case Send = "android.intent.action.SEND"
+    }
+
+    enum Extra: String {
+      case Text = "android.intent.extra.TEXT"
+    }
+
+    @discardableResult func setAction(action: Action) -> Intent {
+      let javaArgs: [JavaParameterConvertible] = [action.rawValue]
+      return self.call("setAction", with: javaArgs) as Intent
+    }
+
+    @discardableResult func setType(type: String) -> Intent {
+      let javaArgs: [JavaParameterConvertible] = [type]
+      return self.call("setType", with: javaArgs) as Intent
+    }
+
+    @discardableResult func putExtra(name: Extra, value: String) -> Intent {
+      let javaArgs: [JavaParameterConvertible] = [name.rawValue, CharSequence(value: value)]
+      return self.call("putExtra", with: javaArgs) as Intent
+    }
+
+    @discardableResult func putExtra(name: Extra, value: URL) -> Intent {
+      let javaArgs: [JavaParameterConvertible] = [name.rawValue, CharSequence(value: value.absoluteString)]
+      return self.call("putExtra", with: javaArgs) as Intent
+    }
+
+    static func createChooser(target: Intent, title: String) -> Intent {
+      let javaArgs: [JavaParameterConvertible] = [target, CharSequence(value: title)]
+      return self.call("createChooser", with: javaArgs) as Intent
+    }
+  }
+
   class Context: Object {
     override class var type: String {
       get {
@@ -340,6 +521,15 @@ class Android {
     func getPackageManager() -> PackageManager {
       return self.call("getPackageManager") as PackageManager
     }
+
+    func getFilesDir() -> File {
+      return self.call("getFilesDir") as File
+    }
+
+    func startActivity(intent: Intent) {
+      let javaArgs: [JavaParameterConvertible] = [intent]
+      self.call("startActivity", with: javaArgs)
+    }
   }
 
   class SharedPreferences: Object {
@@ -362,7 +552,7 @@ class Android {
 
       func remove(key: String) {
         let javaArgs: [JavaParameterConvertible] = [key]
-        let _ = self.call("putString", with: javaArgs) as Editor
+        let _ = self.call("remove", with: javaArgs) as Editor
       }
 
       func putString(key: String, value: String) {
@@ -449,6 +639,52 @@ class Android {
       get {
         return self.get("versionName") as String
       }
+    }
+  }
+
+  class Locale: Object {
+    override class var type: String {
+      get {
+        return "java/util/Locale"
+      }
+    }
+
+    func getLanguage() -> String {
+      return self.call("getLanguage") as String
+    }
+
+    func getCountry() -> String {
+      return self.call("getCountry") as String
+    }
+  }
+
+  class Configuration: Object {
+    override class var type: String {
+      get {
+        return "android/content/res/Configuration"
+      }
+    }
+
+    var locale: Locale {
+      get {
+        return self.get("locale") as Locale
+      }
+    }
+  }
+
+  class Resources: Object {
+    override class var type: String {
+      get {
+        return "android/content/res/Resources"
+      }
+    }
+
+    static func getSystem() -> Resources {
+      return self.call("getSystem") as Resources
+    }
+
+    func getConfiguration() -> Configuration {
+      return self.call("getConfiguration") as Configuration
     }
   }
 
@@ -842,7 +1078,7 @@ class Android {
       return self.call("getInstance", with: javaArgs) as Cipher
     }
 
-    func `init`(opmode: Mode, key: Key) {
+    func initialize(opmode: Mode, key: Key) {
       let javaArgs: [JavaParameterConvertible] = [Int32(opmode.rawValue), Key(for: key.toJavaObject())]
       return self.call("init", with: javaArgs)
     }
@@ -860,10 +1096,141 @@ class Android {
     }
   }
 
+  class Toast: Object {
+    override class var type: String {
+      get {
+        return "android/widget/Toast"
+      }
+    }
+
+    enum Length: Int {
+      case Short = 0
+      case Long = 1
+    }
+
+    static func makeText(context: Context, text: String, duration: Length) -> Toast {
+      let javaArgs: [JavaParameterConvertible] = [Context(for: context.toJavaObject()), CharSequence(value: text), Int32(duration.rawValue)]
+      return self.call("makeText", with: javaArgs) as Toast
+    }
+
+    func show() {
+      self.call("show")
+    }
+  }
+
+  class Activity: Context {
+    override class var type: String {
+      get {
+        return "android/app/Activity"
+      }
+    }
+
+    func finish() {
+      self.call("finish")
+    }
+
+    func invalidateOptionsMenu() {
+      self.call("invalidateOptionsMenu")
+    }
+
+    func setTitle(text: String) {
+      let javaArgs: [JavaParameterConvertible] = [CharSequence(value: text)]
+      self.call("setTitle", with: javaArgs)
+    }
+  }
+
+  class FragmentActivity: Activity {
+    override class var type: String {
+      get {
+        return "androidx/fragment/app/FragmentActivity"
+      }
+    }
+  }
+
+  class Fragment: Object {
+    override class var type: String {
+      get {
+        return "androidx/fragment/app/Fragment"
+      }
+    }
+
+    func getActivity() -> FragmentActivity {
+      return self.call("getActivity") as FragmentActivity
+    }
+  }
+
+  class RecyclerView: Object {
+    override class var type: String {
+      get {
+        return "androidx/recyclerview/widget/RecyclerView"
+      }
+    }
+
+    class ViewHolder: Object {
+      override class var type: String {
+        get {
+          return "androidx/recyclerview/widget/RecyclerView$ViewHolder"
+        }
+      }
+    }
+  }
+
+  class MenuItem: Object {
+    override class var type: String {
+      get {
+        return "android/view/MenuItem"
+      }
+    }
+
+    enum ShowAction: Int {
+      case Never = 0
+      case IfRoom = 1
+      case Always = 2
+    }
+
+    func getGroupId() -> Int {
+      return Int(self.call("getGroupId") as Int32)
+    }
+
+    func getItemId() -> Int {
+      return Int(self.call("getItemId") as Int32)
+    }
+
+    func getOrder() -> Int {
+      return Int(self.call("getOrder") as Int32)
+    }
+
+    @discardableResult func setEnabled(state: Bool) -> MenuItem {
+      let javaArgs: [JavaParameterConvertible] = [state]
+      return self.call("setEnabled", with: javaArgs) as MenuItem
+    }
+
+    @discardableResult func setShowAsAction(method: ShowAction) -> MenuItem {
+      let javaArgs: [JavaParameterConvertible] = [Int32(method.rawValue)]
+      return self.call("setShowAsActionFlags", with: javaArgs) as MenuItem
+    }
+  }
+
+  class Menu: Object {
+    override class var type: String {
+      get {
+        return "android/view/Menu"
+      }
+    }
+
+    func clear() {
+      self.call("clear")
+    }
+
+    @discardableResult func add(groupId: Int, itemId: Int, order: Int, title: String) -> MenuItem {
+      let javaArgs: [JavaParameterConvertible] = [Int32(groupId), Int32(itemId), Int32(order), CharSequence(value: title)]
+      return self.call("add", with: javaArgs) as MenuItem
+    }
+  }
+
   static var context: Context = {
     let javaThread = ActivityThread.currentActivityThread()
     let javaApp = javaThread.getApplication()
     return javaApp.getApplicationContext()
   }()
 }
-

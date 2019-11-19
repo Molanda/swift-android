@@ -1,3 +1,3 @@
 # Android Bridge
 
-Android bridge to the JNI module in SCADE.
+Android bridge examples for [swift-jni](https://github.com/SwiftAndroid/swift-jni/tree/swift5).
